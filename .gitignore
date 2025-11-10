@@ -100,3 +100,5 @@ wallycore.wasm
 *.pdb
 *.ilk
 *.exp
+.zig-cache/
+*.a
