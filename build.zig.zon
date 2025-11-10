@@ -47,14 +47,9 @@
         "build.zig",
         "build.zig.zon",
 
-        // Zig wrapper source
+        // Zig wrapper source files
         "src/main.zig",
         "src/root.zig",
-
-        // libwally C sources (we compile these)
-        "src",
-        "include",
-        "config.h",
 
         // Documentation
         "zig.md",
