@@ -4,59 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Build the libwally-core C library as a static library
-    const libwally = b.addLibrary(.{
-        .name = "wally",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-        .linkage = .static,
-    });
-
-    // Use the amalgamation build (single combined.c file)
-    libwally.addCSourceFile(.{
-        .file = b.path("src/amalgamation/combined.c"),
-        .flags = &.{
-            "-DBUILD_ELEMENTS", // Enable Elements/Liquid support
-            "-DUSE_ECMULT_STATIC_PRECOMPUTATION",
-            "-DECMULT_WINDOW_SIZE=15",
-            "-DWALLY_CORE_BUILD",
-            "-std=c99",
-            "-Wno-unused-function",
-        },
-    });
-
-    // Add include directories
-    libwally.addIncludePath(b.path("."));           // Root dir for secp256k1 includes
-    libwally.addIncludePath(b.path("include"));
-    libwally.addIncludePath(b.path("src"));
-    libwally.addIncludePath(b.path("src/ccan"));
-    libwally.addIncludePath(b.path("src/secp256k1"));
-    libwally.addIncludePath(b.path("src/secp256k1/include"));
-
-    // Link system libraries
-    libwally.linkLibC();
-
-    // Install the library
-    b.installArtifact(libwally);
-
     // Create the Zig wrapper module
+    // Users must provide libwally-core via system linkage or build options
     const mod = b.addModule("libwally_core", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
 
-    // Link the C library to the module
-    mod.linkLibrary(libwally);
+    // Link against system libwally-core
+    // Users can override with: -Dlibwally-path=/custom/path
+    const libwally_path = b.option([]const u8, "libwally-path", "Path to libwally-core installation") orelse "/usr/local";
 
-    // Add include paths to the module for C headers
-    mod.addIncludePath(b.path("."));
-    mod.addIncludePath(b.path("include"));
-    mod.addIncludePath(b.path("src"));
-    mod.addIncludePath(b.path("src/ccan"));
-    mod.addIncludePath(b.path("src/secp256k1"));
-    mod.addIncludePath(b.path("src/secp256k1/include"));
+    // Add include paths for C headers
+    const include_path = b.pathJoin(&.{ libwally_path, "include" });
+    mod.addIncludePath(.{ .cwd_relative = include_path });
+
+    // Link the library
+    mod.linkSystemLibrary("wallycore", .{});
+    mod.linkLibC();
 
     // Create an example executable
     const exe = b.addExecutable(.{
@@ -84,17 +49,21 @@ pub fn build(b: *std.Build) void {
     }
 
     // Test infrastructure
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    const lib_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    // Add same dependencies to tests
+    lib_unit_tests.root_module.addIncludePath(.{ .cwd_relative = include_path });
+    lib_unit_tests.root_module.linkSystemLibrary("wallycore", .{});
+    lib_unit_tests.root_module.linkLibC();
 
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_lib_unit_tests.step);
 }

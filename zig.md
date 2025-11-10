@@ -17,42 +17,56 @@ Thin Zig wrapper around [libwally-core](https://github.com/ElementsProject/libwa
   - Script operations
   - Elements/Liquid confidential transactions
 
+## Prerequisites
+
+**You must build and install libwally-core before using this wrapper.**
+
+### Building libwally-core
+
+```bash
+# Clone the repository (if you haven't already)
+git clone --recursive https://github.com/ElementsProject/libwally-core.git
+cd libwally-core
+
+# Option 1: Autotools build
+./tools/autogen.sh
+./configure --enable-elements
+make
+sudo make install
+
+# Option 2: CMake build
+mkdir build && cd build
+cmake .. -DBUILD_ELEMENTS=ON
+make
+sudo make install
+```
+
+This will install:
+- Headers to `/usr/local/include/wally_*.h`
+- Library to `/usr/local/lib/libwallycore.{a,so,dylib}`
+
+### Custom Installation Path
+
+If you installed to a custom location:
+
+```bash
+./configure --prefix=/custom/path --enable-elements
+make && make install
+```
+
+Then use `-Dlibwally-path=/custom/path` when building with Zig.
+
 ## Installation
 
 ### Using zig fetch (recommended)
 
-Add this library as a dependency to your project using `zig fetch`:
+Add this library as a dependency to your project:
 
 ```bash
-# Replace with your fork URL or the upstream URL
 zig fetch --save git+https://github.com/YOUR_USERNAME/libwally-core.git
 ```
 
-This will:
-1. Download the library
-2. Add it to your `build.zig.zon` dependencies
-3. Generate a content hash for the dependency
-
-### Manual configuration
-
-If you prefer to add the dependency manually, update your `build.zig.zon`:
-
-```zig
-.{
-    .name = "my-bitcoin-app",
-    .version = "0.1.0",
-    .dependencies = .{
-        .libwally_core = .{
-            .url = "git+https://github.com/YOUR_USERNAME/libwally-core.git#COMMIT_HASH",
-            .hash = "HASH_HERE", // Run `zig build` to compute this
-        },
-    },
-}
-```
-
 ### Add to your build.zig
-
-In your `build.zig`, add the module as a dependency:
 
 ```zig
 const std = @import("std");
@@ -65,6 +79,8 @@ pub fn build(b: *std.Build) void {
     const libwally_dep = b.dependency("libwally_core", .{
         .target = target,
         .optimize = optimize,
+        // Optional: specify custom libwally-core path
+        // .@"libwally-path" = "/custom/path",
     });
     const libwally_mod = libwally_dep.module("libwally_core");
 
@@ -83,6 +99,18 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 }
+```
+
+### Environment Setup
+
+Make sure pkg-config can find libwally-core:
+
+```bash
+# Check if libwally-core is found
+pkg-config --cflags --libs wallycore
+
+# If not found, add to PKG_CONFIG_PATH
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
 ```
 
 ## Usage
@@ -121,16 +149,17 @@ pub fn main() !void {
     std.crypto.random.bytes(&entropy);
 
     // Generate mnemonic from entropy
-    var mnemonic_buf: [256]u8 = undefined;
-    try wally.bip39MnemonicFromBytes(&entropy, &mnemonic_buf);
+    var mnemonic_ptr: [*c]u8 = null;
+    try wally.bip39MnemonicFromBytes(&entropy, &mnemonic_ptr);
+    defer wally.free(mnemonic_ptr);
 
-    const mnemonic = std.mem.span(@as([*:0]u8, @ptrCast(&mnemonic_buf)));
+    const mnemonic = std.mem.span(@as([*:0]const u8, @ptrCast(mnemonic_ptr)));
     std.debug.print("Mnemonic: {s}\n", .{mnemonic});
 
     // Convert mnemonic to seed
     var seed: [wally.BIP39_SEED_LEN_512]u8 = undefined;
     try wally.bip39MnemonicToSeed(
-        @ptrCast(&mnemonic_buf),
+        mnemonic_ptr,
         null, // no passphrase
         &seed,
     );
@@ -150,7 +179,7 @@ pub fn main() !void {
 #### Derive child keys using BIP32 paths
 
 ```zig
-// Derive m/44'/0'/0'/0/0 (first receive address)
+// Derive m/44'/0'/0'/0/0 (first Bitcoin receive address)
 const path = [_]u32{
     0x8000002C, // 44' (purpose)
     0x80000000, // 0'  (coin type - Bitcoin)
@@ -159,19 +188,18 @@ const path = [_]u32{
     0,          // 0   (address index)
 };
 
-var child_key: ?*wally.c.ext_key = null;
+var child_key: wally.c.ext_key = undefined;
 try wally.bip32KeyFromParentPath(
     master_key,
     &path,
     wally.BIP32_FLAG_KEY_PRIVATE,
     &child_key,
 );
-defer wally.bip32KeyFree(child_key);
 
 // Generate address from child key
 var address_buf: [128]u8 = undefined;
 try wally.bip32KeyToAddress(
-    child_key.?,
+    &child_key,
     wally.BIP32_FLAG_KEY_PUBLIC,
     wally.WALLY_ADDRESS_VERSION_P2PKH_MAINNET,
     &address_buf,
@@ -234,27 +262,6 @@ try wally.ecSigVerify(
 std.debug.print("Signature verified successfully!\n", .{});
 ```
 
-#### Create a Bitcoin transaction
-
-```zig
-// Create a new transaction
-const tx = try wally.txInit(
-    2,  // version
-    0,  // locktime
-    1,  // num inputs
-    1,  // num outputs
-);
-defer wally.txFree(tx);
-
-// Note: Adding inputs and outputs requires constructing
-// wally_tx_input and wally_tx_output structs using the C API
-// See the wally.c namespace for full transaction construction
-
-// Get transaction ID
-var txid: [wally.WALLY_TXHASH_LEN]u8 = undefined;
-try wally.txGetTxid(tx, &txid);
-```
-
 ### Advanced Usage: Direct C API Access
 
 All C functions are available through the `wally.c` namespace:
@@ -304,9 +311,13 @@ const result = wally.someFunction(...) catch |err| {
 
 ## Memory Management
 
-Functions that allocate memory (e.g., `bip32KeyFromSeedAlloc`) return pointers that **must** be freed:
+Functions that allocate memory (e.g., `bip39MnemonicFromBytes`, `bip32KeyFromSeedAlloc`) return pointers that **must** be freed:
 
 ```zig
+var mnemonic_ptr: [*c]u8 = null;
+try wally.bip39MnemonicFromBytes(&entropy, &mnemonic_ptr);
+defer wally.free(mnemonic_ptr);
+
 const key = try wally.bip32KeyFromSeedAlloc(seed, version, flags);
 defer wally.bip32KeyFree(key);
 ```
@@ -321,35 +332,82 @@ wally.bzero(&privkey, privkey.len);
 
 ## Building from Source
 
-To build the library locally:
+To build and test this wrapper locally:
 
 ```bash
-# Clone with submodules (includes libsecp256k1)
-git clone --recursive https://github.com/YOUR_USERNAME/libwally-core.git
+# Ensure libwally-core is installed first (see Prerequisites)
+
+# Clone this repo
+git clone https://github.com/YOUR_USERNAME/libwally-core.git
 cd libwally-core
 
 # Build and run example
 zig build run
 
-# Run tests
+# Run tests (requires libwally-core installed)
 zig build test
+
+# Specify custom libwally-core path
+zig build test -Dlibwally-path=/custom/path
+```
+
+## Dependencies
+
+### Required:
+- **libwally-core** (>= 1.5.0) - Must be built and installed separately
+- **libsecp256k1-zkp** - Included with libwally-core build
+
+### Runtime:
+- Standard C library (libc)
+
+### Build:
+- Zig >= 0.15.1
+
+## Troubleshooting
+
+### "cannot find -lwallycore"
+
+Make sure libwally-core is installed:
+```bash
+# Check if library exists
+ls /usr/local/lib/libwallycore.*
+
+# Add to library path if needed (Linux)
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
+# macOS
+export DYLD_LIBRARY_PATH=/usr/local/lib:$DYLD_LIBRARY_PATH
+```
+
+### "wally_core.h file not found"
+
+Specify the correct include path:
+```bash
+zig build -Dlibwally-path=/usr/local
+```
+
+### Tests fail to link
+
+Ensure you've built libwally-core with all required features:
+```bash
+./configure --enable-elements
+make clean && make && sudo make install
 ```
 
 ## API Documentation
 
-This wrapper provides thin Zig bindings with idiomatic error handling. For detailed API documentation, refer to the upstream libwally-core documentation:
+This wrapper provides thin Zig bindings with idiomatic error handling. For detailed API documentation, refer to:
 
 - [libwally-core Documentation](https://wally.readthedocs.io/)
-- [C API Headers](./include/)
+- [C API Headers](https://github.com/ElementsProject/libwally-core/tree/master/include)
 - [Example Usage](./src/main.zig)
 
 ## Supported Platforms
 
 - Linux (x86_64, ARM64)
-- macOS (x86_64, ARM64)
-- Windows (x86_64)
-- WebAssembly (WASI)
-- Other platforms supported by Zig and libwally-core
+- macOS (x86_64, ARM64/Apple Silicon)
+- Windows (x86_64) - with MinGW or MSVC
+- Any platform supported by both Zig and libwally-core
 
 ## License
 
@@ -362,26 +420,6 @@ Contributions are welcome! Please ensure:
 - Error handling is properly implemented
 - Tests are added for new functionality
 - Documentation is updated
-
-## Troubleshooting
-
-### Build errors about missing headers
-
-Ensure git submodules are initialized:
-```bash
-git submodule update --init --recursive
-```
-
-### Link errors on macOS
-
-Zig automatically handles C library linking. If you encounter issues, ensure you have Xcode Command Line Tools installed:
-```bash
-xcode-select --install
-```
-
-### Elements/Liquid support
-
-This build includes full Elements/Liquid support by default. To disable it, modify `build.zig` and remove the `-DBUILD_ELEMENTS` flag.
 
 ## Resources
 
