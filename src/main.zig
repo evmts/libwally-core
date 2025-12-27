@@ -125,8 +125,8 @@ fn demoKeyDerivation() !void {
         0x8000002C, // 44' (purpose)
         0x80000000, // 0'  (coin type - Bitcoin)
         0x80000000, // 0'  (account)
-        0,          // 0   (external chain)
-        0,          // 0   (address index)
+        0, // 0   (external chain)
+        0, // 0   (address index)
     };
 
     var child_key: ?*wally.c.ext_key = null;
