@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
             "-std=c99",
             "-Wno-unused-function",
             "-fno-sanitize=undefined", // Disable UBSan to avoid runtime dependencies
+            "-fPIC", // Required for shared libraries on Linux
         },
     });
 
